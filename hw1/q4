@@ -1,0 +1,165 @@
+import copy
+import math
+from transformer import ABS_RoPE,Embedding,Transformer_Block
+from einops import einsum,rearrange
+import numpy as np
+import torch 
+from torch import nn
+from deepul.hw1_helper import (
+    # Q1
+    visualize_q1_data,
+    q1_sample_data_1,
+    q1_sample_data_2,
+    q1_save_results,
+    # Q2
+    q2a_save_results,
+    q2b_save_results,
+    visualize_q2a_data,
+    visualize_q2b_data,
+    # Q3
+    q3ab_save_results,
+    q3c_save_results,
+    # Q4
+    q4a_save_results,
+    q4b_save_results,
+    # Q5
+    visualize_q5_data,
+    q5a_save_results,
+    # Q6
+    visualize_q6_data,
+    q6a_save_results,
+)
+
+device='cuda'
+
+def _get_clones(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
+
+
+class iGPT(nn.Module):
+    def __init__(self,d_model,vocab_size, H,W,context_length,num_layers,num_heads,d_ff,theta,max_seq_len):
+        super().__init__()
+        
+        self.H=H
+        self.W=W
+        
+        if max_seq_len==None:
+            max_seq_len=context_length
+
+        self.pe=ABS_RoPE(theta, d_model, max_seq_len).to(device)
+        self.embedding=Embedding(vocab_size, d_model).to(device)
+        
+        Layer=Transformer_Block(d_model, num_heads, d_ff).to(device)
+        
+        self.Trans=_get_clones(Layer,num_layers)
+
+        self.Linear=torch.nn.Linear(d_model, vocab_size-1)
+        
+        self.lm=torch.nn.LayerNorm(vocab_size-1).to(device)
+        self.layers=num_layers
+        self.d_model=d_model
+        
+        self.vocab_size=vocab_size
+        
+        self.softmax=torch.nn.Softmax(dim=-1)
+    
+    
+    def forward(self,x:np.ndarray):
+        
+        x=torch.LongTensor(x).to(device)
+        x=x.to(device)
+        x=self.embedding(x)
+        x=self.pe(x)
+        for i in range(0,self.layers):
+            x=self.Trans[i](x)
+    
+        x=self.Linear(x)
+        x=self.lm(x)
+        x=self.softmax(x)
+        
+        return x
+    
+    def compute_maxlikelihood(self,x:np.ndarray):
+        prob=self.forward(x[:,:-1]).to(device)
+        
+        y=torch.LongTensor(x[:,1:]).to(dtype=torch.int64).to(device)
+        y=y.unsqueeze(-1)
+        p=torch.gather(prob, dim=-1, index=y).squeeze()
+        L=torch.log(p)
+        return L.mean()
+    
+    def sample(self,num_samples):
+        with torch.no_grad():
+            h=(self.vocab_size-1)*np.ones(shape=(num_samples,1))
+            
+            for i in range(0,self.H):
+                for j in range(0,self.W):
+                    probs=self.forward(h)
+                    
+                    dist=torch.distributions.Categorical(probs=probs)
+                    next_pixcel=dist.sample().cpu().detach().numpy()[:,[-1]]
+                    h=np.concatenate((h, next_pixcel),axis=1)
+                    
+            sample=h[:,1:]
+            
+            sample=sample.reshape((num_samples,self.W,self.H))
+        return sample
+        
+
+
+
+def q4_a(images,vqvae):
+    autoencoded_images=vqvae.quantize(images)
+    print(autoencoded_images.shape)
+    print(vqvae.n_embeddings)
+    autoencoded_images=vqvae.decode(autoencoded_images)
+    return autoencoded_images
+
+def q4_b(train_data,test_data,image_shape,dset_id,vqvae):
+    
+    u=vqvae.quantize(train_data[:2])
+    H=u.shape[1]
+    W=u.shape[2]
+    total=train_data.shape[0]
+    n_embd=vqvae.n_embeddings
+    
+    model=iGPT(d_model=128, vocab_size=1+n_embd, H=H, W=W, context_length=1+H*W, num_layers=4,
+               num_heads=4, d_ff=128, theta=10000, max_seq_len=1+H*W)
+    
+    model.to(device)
+    batch_size=32
+    n_batches=total//batch_size
+    epoch=5
+    
+    model.load_state_dict(torch.load('iGPT_shape_q4_2.pth'))
+    
+    opt=torch.optim.Adam(model.parameters(),lr=1e-3)
+    
+    train_losses=[1]
+    for i in range(0,epoch):
+        rand_indices = np.random.randint(0,total, size=(batch_size*n_batches,))
+        for j in range(0,n_batches):
+            data=train_data[rand_indices[j*batch_size:(j+1)*batch_size]]
+            data=vqvae.quantize(data).reshape((batch_size,H*W))
+            h=n_embd*np.ones(shape=(batch_size,1))
+            data=np.concatenate((h,data),axis=1)
+            
+            L=-model.compute_maxlikelihood(data)
+            
+            print(i,L)
+            opt.zero_grad()
+            L.backward()
+            opt.step()
+            train_losses.append(L.cpu().detach().numpy())
+        torch.save(model.state_dict(),'iGPT_shape_q4_2.pth')
+        
+    sample=model.sample(100)
+    train_losses=np.array(train_losses)
+    sample=vqvae.decode(sample)
+    return train_losses,np.array([1]),sample
+            
+            
+            
+            
+            
+q4b_save_results(2, q4_b)
