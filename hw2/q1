@@ -1,0 +1,187 @@
+from deepul.hw2_helper import *
+import numpy as np
+import os
+import torch
+import torch.nn as nn
+device='cuda'
+class Encoder(nn.Module):
+    def __init__(self,input_dim:int):
+        super().__init__()
+        self.z_dim=2 
+        self.hidden_dim=20
+        
+        self.acti=torch.nn.ReLU()
+        self.mu=torch.nn.Linear(input_dim, self.hidden_dim).to(device)
+        self.L1=torch.nn.Linear(self.hidden_dim,self.hidden_dim).to(device)
+        self.L2=torch.nn.Linear(self.hidden_dim,2).to(device)
+        
+        self.c=torch.nn.Linear(input_dim, self.hidden_dim).to(device)
+        self.L3=torch.nn.Linear(self.hidden_dim,self.hidden_dim).to(device)
+        self.L4=torch.nn.Linear(self.hidden_dim,2).to(device)
+        
+    def mean(self,x:torch.Tensor):
+        
+        x=self.mu(x)
+        x=self.acti(x)
+        x=self.L1(x)
+        x=self.acti(x)
+        x=self.L2(x)
+        return x
+    
+    def cov(self,x:torch.Tensor):
+        
+        x=self.c(x)
+        x=self.L3(x)
+        x=self.acti(x)
+        x=self.L4(x)
+        return x
+        
+    def forward(self,x:torch.Tensor):
+        mean=self.mean(x)
+        
+        
+        cov=torch.diag_embed(torch.exp(self.cov(x)))
+        
+        dist=torch.distributions.MultivariateNormal(loc=mean,covariance_matrix=cov)
+        
+        return dist
+
+class Decoder(nn.Module):
+    def __init__(self,input_dim:int):
+        super().__init__()
+        self.z_dim=2 
+        
+        self.hidden_dim=20
+        
+        self.acti=torch.nn.ReLU()
+        self.mu=torch.nn.Linear(input_dim, self.hidden_dim).to(device)
+        self.L1=torch.nn.Linear(self.hidden_dim,self.hidden_dim).to(device)
+        self.L2=torch.nn.Linear(self.hidden_dim,2).to(device)
+        
+        self.c=torch.nn.Linear(input_dim, self.hidden_dim).to(device)
+        self.L3=torch.nn.Linear(self.hidden_dim,self.hidden_dim).to(device)
+        self.L4=torch.nn.Linear(self.hidden_dim,2).to(device)
+        
+    def mean(self,x:torch.Tensor):
+        
+        x=self.mu(x)
+        x=self.acti(x)
+        x=self.L1(x)
+        x=self.acti(x)
+        x=self.L2(x)
+        return x
+    
+    def cov(self,x:torch.Tensor):
+        
+        x=self.c(x)
+        x=self.L3(x)
+        x=self.acti(x)
+        x=self.L4(x)
+        return x
+        
+    def forward(self,x:torch.Tensor):
+        mean=self.mean(x)
+        
+        
+        cov=torch.diag_embed(torch.exp(self.cov(x)))
+        dist=torch.distributions.MultivariateNormal(loc=mean,covariance_matrix=cov)
+        
+        return dist
+
+class VAE(nn.Module):
+    def __init__(self,input_dim:int):
+        super().__init__()
+        self.z_dim=2 
+        
+        self.encoder=Encoder(input_dim)
+        self.decoder=Decoder(input_dim)
+        
+        self.z=torch.distributions.MultivariateNormal(loc=torch.zeros((2,),device=device),
+                                                      covariance_matrix=torch.diag_embed(torch.ones((2,),device=device)))
+        
+    def recon_Loss(self,x:np.ndarray):
+        x=torch.Tensor(x).to(device)
+        q=self.encoder(x)
+        
+        zs=q.rsample()
+        p=self.decoder(zs)
+        recon_x=p.log_prob(x)
+        
+        return -recon_x.mean()
+    
+    def KL(self,x:np.ndarray):
+        x=torch.Tensor(x).to(device)
+        
+        
+        
+        q=self.encoder(x)
+        zs=q.rsample()
+        out=q.log_prob(zs)-self.z.log_prob(zs)
+        
+        return out.mean()
+    
+    def ELBO(self,x:np.ndarray):
+        L=self.recon_Loss(x)+self.KL(x)
+        return -L.mean()
+    
+    
+    def sample_with_noise(self,num_samples):
+        
+        zs=self.z.sample((num_samples,))
+        xs=self.decoder(zs).sample()
+        return xs
+    
+    def sample_without_noise(self,num_samples):
+        zs=self.z.sample((num_samples,))
+        xs=self.decoder.mean(zs)
+        return xs
+
+
+def q1(train_data,test_data, part,dset_id):
+    visualize_q1_data(part, dset_id)
+    test_data=test_data[:100]
+    
+    total=train_data.shape[0]
+    batch_size=100
+    n_batches=total//batch_size
+    
+    model=VAE(input_dim=2)
+    model.to(device)
+    
+    epoch=8
+    opt=torch.optim.Adam(model.parameters(),lr=1e-3)
+    
+    train_loss=[]
+    test_loss=[]
+    for i in range(0,epoch):
+        rand_indices = np.random.randint(0,total, size=(batch_size*n_batches,))
+        for j in range(0,n_batches):
+            data=train_data[rand_indices[j*batch_size:(j+1)*batch_size]]
+            L=-model.compute_maxlikelihood(data)
+            
+            opt.zero_grad()
+            L.backward()
+            
+            opt.step()
+            
+            ELBO=model.ELBO(data).cpu().detach().numpy()
+            recon_loss=model.recon_Loss(data).cpu().detach().numpy()
+            KL=model.KL(data).cpu().detach().numpy()
+            print(L.cpu().detach().numpy())
+            train_loss.append([-ELBO,recon_loss,KL])
+        
+        with torch.no_grad():
+            ELBO=model.ELBO(data).cpu().detach().numpy()
+            recon_loss=model.recon_Loss(data).cpu().detach().numpy()
+            KL=model.KL(data).cpu().detach().numpy()
+            test_loss.append([-ELBO,recon_loss,KL])
+            
+    train_loss=np.array(train_loss)
+    test_loss=np.array(test_loss)
+    
+    x1=model.sample_with_noise(1000).cpu().detach().numpy()
+    x2=model.sample_without_noise(1000).cpu().detach().numpy()
+    
+    return train_loss,test_loss,x1,x2
+
+q1_save_results('b', 1, q1)
