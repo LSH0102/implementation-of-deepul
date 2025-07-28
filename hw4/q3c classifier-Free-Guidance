@@ -1,0 +1,115 @@
+from deepul.hw4_helper import *
+import warnings
+warnings.filterwarnings('ignore')
+
+from torch.nn.functional import interpolate
+from torch.optim.lr_scheduler import LRScheduler,LinearLR,CosineAnnealingLR,SequentialLR
+from DiffusionTransformer import DiT
+import numpy as np
+import torch
+import torch.nn as nn
+device='cuda'
+
+
+class DDPM(nn.Module):
+    def __init__(self,input_shape,patch_size,hidden_size,num_heads,num_layers,num_classes,droup=0.1):
+        super().__init__()
+        self.f=DiT(input_shape, patch_size, hidden_size, num_heads, num_layers, num_classes).to(device)
+        self.C,self.H,self.W=input_shape
+    def compute_loss(self,eps,label,x_t,t):
+       eps=torch.Tensor(eps).to(device)
+       x_t=torch.Tensor(x_t).to(device)
+       t=torch.Tensor(t).to(device)
+       
+       
+       eps_hat=self.f(x_t,label, t.cpu().detach().numpy())
+       L=((eps-eps_hat)**2).mean()
+       return L
+       
+    def sample(self,num_samples,num_steps,label):
+        ts=np.linspace(1-1e-4, 1e-4,num_steps+1)
+        normal=torch.distributions.MultivariateNormal(loc=torch.zeros(size=(self.C*self.H*self.H,),device=device),
+                                                      covariance_matrix=torch.eye(self.C*self.H*self.H,device=device))
+        x=normal.sample((num_samples,))
+        x=x.reshape((num_samples,self.C,self.H,self.W))
+        label=label*np.ones((num_samples,))
+        with torch.no_grad():
+            for i in range(0,num_steps):
+                t=ts[i]*np.ones((num_samples,))
+                tm1=ts[i+1]*np.ones((num_samples,))
+                t=torch.Tensor(t).to(device)
+                tm1=torch.Tensor(tm1).to(device)
+                
+                eps_hat=self.f(x,label,t.cpu().detach().numpy())
+                x=self.update(x, eps_hat, t, tm1)
+        return x.cpu().detach().numpy()
+    
+    def sample_CFG(self,num_samples,num_steps,label,w:float):
+        ts=np.linspace(1-1e-4, 1e-4,num_steps+1)
+        normal=torch.distributions.MultivariateNormal(loc=torch.zeros(size=(self.C*self.H*self.H,),device=device),
+                                                      covariance_matrix=torch.eye(self.C*self.H*self.H,device=device))
+        x=normal.sample((num_samples,))
+        x=x.reshape((num_samples,self.C,self.H,self.W))
+        label=label*np.ones((num_samples,))
+        with torch.no_grad():
+            for i in range(0,num_steps):
+                t=ts[i]*np.ones((num_samples,))
+                tm1=ts[i+1]*np.ones((num_samples,))
+                
+                tm1=torch.Tensor(tm1).to(device)
+                
+                empt=10*np.ones((num_samples,))
+                
+                eps_hat=(1-w)*self.f(x,empt,t)+w*self.f(x,label,t)
+                t=torch.Tensor(t).to(device)
+                x=self.update(x, eps_hat, t, tm1)
+        return x.cpu().detach().numpy()
+            
+        
+    
+    def update(self,x:torch.Tensor,eps_hat,t,tm1):
+        with torch.no_grad():
+            batch_size=x.shape[0]
+            alpha_t=torch.cos(np.pi/2.0*t)[:,np.newaxis,np.newaxis,np.newaxis]
+            sigma_t=torch.sin(np.pi/2.0*t)[:,np.newaxis,np.newaxis,np.newaxis]
+            
+            alpha_tm1=torch.cos(np.pi/2.0*tm1)[:,np.newaxis,np.newaxis,np.newaxis]
+            sigma_tm1=torch.sin(np.pi/2.0*tm1)[:,np.newaxis,np.newaxis,np.newaxis]
+            
+            eta=sigma_tm1/sigma_t*torch.sqrt(1.0-(alpha_t/alpha_tm1)**2)
+            
+            normal=torch.distributions.MultivariateNormal(loc=torch.zeros(size=(self.C*self.H*self.H,),device=device),
+                                                          covariance_matrix=torch.eye(self.C*self.H*self.H,device=device))
+            eps_t=normal.sample((batch_size,))
+            eps_t=eps_t.reshape((batch_size,self.C,self.H,self.W))
+            
+            x=alpha_tm1*((x-sigma_t*eps_hat)/alpha_t).clamp(min=-1.0,max=1.0) +torch.sqrt(torch.clamp(sigma_tm1**2-eta**2,min=0.0))*eps_hat+eta*eps_t
+        return x
+
+def q3_c(vae):
+    C,H,W=4,8,8
+    input_shape=[C,H,W]
+    model=DDPM(input_shape=input_shape, patch_size=2, hidden_size=512, num_heads=8, num_layers=12, num_classes=10)
+    model.to(device)
+    
+    model.load_state_dict(torch.load('q3.pth'))
+    
+    model.f.infer()
+    samples=[]
+    sample=[]
+    scale_factor=1.28
+    for w in [1.0,3.0,5.0,7.5]:
+        sample=[]
+        for i in range(0,10):
+            s=model.sample_CFG(10, 512,i,w)
+            s=scale_factor*s
+            
+            sample.append(vae.decode(s).cpu().detach().numpy())
+        sample=np.stack(sample,axis=0)
+        sample=sample.transpose(0,1,3,4,2)
+        samples.append(sample)
+    samples=np.stack(samples,axis=0)
+    samples=(samples-samples.min())/(samples.max()-samples.min())
+    return samples
+
+q3c_save_results(q3_c)
