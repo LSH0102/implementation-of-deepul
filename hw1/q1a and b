@@ -1,0 +1,154 @@
+import numpy as np
+import torch 
+from torch import nn
+from deepul.hw1_helper import (
+    # Q1
+    visualize_q1_data,
+    q1_sample_data_1,
+    q1_sample_data_2,
+    q1_save_results,
+    # Q2
+    q2a_save_results,
+    q2b_save_results,
+    visualize_q2a_data,
+    visualize_q2b_data,
+    # Q3
+    q3ab_save_results,
+    q3c_save_results,
+    # Q4
+    q4a_save_results,
+    q4b_save_results,
+    # Q5
+    visualize_q5_data,
+    q5a_save_results,
+    # Q6
+    visualize_q6_data,
+    q6a_save_results,
+)
+
+class P(nn.Module):
+    def __init__(self,input_dim:int):
+        super().__init__()
+        self.input_dim=input_dim
+        self.theta=nn.Parameter(torch.zeros(input_dim))
+        
+    def forward(self,x:np.ndarray):
+        x=torch.LongTensor(x)
+        out=torch.exp(self.theta)
+        prob=out/out.sum(dim=-1)
+        out=torch.gather(prob, dim=-1, index=x)
+        return out
+    def compute_maxlikelihood(self,x:np.ndarray):
+        L=self.forward(x)
+        logL=torch.log(L).sum()
+        
+        return logL
+    
+    def prob(self) -> np.ndarray:
+        with torch.no_grad():
+            out=torch.exp(self.theta)
+            prob=out/out.sum(dim=-1)
+        return prob.numpy()
+    
+def q1_a(train_data, test_data, d, dset_id):
+    batch_size=train_data.shape[0]
+    mini_batch_size=150
+    epochs=500
+    input_dim=d
+    model=P(input_dim)
+    opt=torch.optim.Adam(model.parameters(),lr=1e-2)
+    train_losses=[]
+    test_losses=[]
+    test_losses.append(-model.compute_maxlikelihood(test_data).detach().numpy())
+    for i in range(0,epochs):
+        rand_indices = np.random.randint(0,batch_size , size=(mini_batch_size,))
+        data=train_data[rand_indices]
+        
+        L=-model.compute_maxlikelihood(data)
+        opt.zero_grad()
+        L.backward()
+        opt.step()
+        
+        train_losses.append(L.detach().numpy())
+        test_losses.append(L.detach().numpy())
+    train_losses=np.array(train_losses)
+    test_losses=np.array(test_losses)
+    return train_losses,test_losses,model.prob()
+
+
+class Logistic(nn.Module):
+    def __init__(self,input_dim:int):
+        super().__init__()
+        self.pi=nn.Parameter(torch.normal(mean=0,std=0.5, size=(4,)))
+        self.mu=nn.Parameter(torch.normal(mean=input_dim/2,std=0.5,size=(4,)))
+        self.s=nn.Parameter(torch.exp(torch.normal(mean=1, std=0.5,size=(4,))))
+        self.sig=torch.nn.Sigmoid()
+        self.dim=input_dim
+        
+    def forward(self,x:np.ndarray):
+        x1=torch.Tensor(x).reshape(shape=(x.shape[0],1))
+        x2=torch.Tensor(x).reshape(shape=(x.shape[0],1))
+       
+        x1=x1.broadcast_to((x1.shape[0],self.pi.shape[0]))
+        x2=x2.broadcast_to((x2.shape[0],self.pi.shape[0]))
+        mask1=torch.where(x1==0,0,1)
+        mask2=torch.where(x2==self.dim-1,0,1)
+        add2=torch.where(x2==self.dim-1,1,0)
+        x1=x1-0.5
+        x2=x2+0.5
+       
+        pi=torch.exp(self.pi)
+        pi=pi/pi.sum(dim=0,keepdim=True)
+        
+        
+        x1=self.sig((x1-self.mu)/(self.s+1e-6))*mask1
+        
+        x2=self.sig((x2-self.mu)/(self.s+1e-6))*mask2+add2
+        out=x2-x1
+        
+        out=(pi*out).sum(dim=-1)
+       
+        return out
+    
+    def compute_maxlikelihood(self,x:np.ndarray):
+        L=self.forward(x)
+        logL=torch.log(L).sum()
+        
+        return logL
+    
+    def prob(self):
+        x=np.arange(0,self.dim )
+        with torch.no_grad():
+            prob=self.forward(x)
+        
+        return prob.numpy()
+
+def q1_b(train_data, test_data, d, dset_id):
+    batch_size=train_data.shape[0]
+    mini_batch_size=150
+    epochs=500
+    
+    input_dim=d
+    model=Logistic(input_dim)
+    opt=torch.optim.Adam(model.parameters(),lr=1.5*1e-1)
+    train_losses=[]
+    test_losses=[]
+    test_losses.append(-model.compute_maxlikelihood(test_data).detach().numpy())
+
+    for i in range(0,epochs):
+        rand_indices = np.random.randint(0,batch_size , size=(mini_batch_size,))
+        data=train_data[rand_indices]
+        L=-model.compute_maxlikelihood(data)
+        
+        opt.zero_grad()
+        L.backward()
+        opt.step()
+        
+        train_losses.append(L.detach().numpy())
+        test_losses.append(L.detach().numpy())
+    train_losses=np.array(train_losses)
+    test_losses=np.array(test_losses)
+    
+    return train_losses,test_losses,model.prob()
+
+q1_save_results(1, 'b', q1_b)
