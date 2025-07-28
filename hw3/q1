@@ -1,0 +1,169 @@
+import torch
+import torch.nn as nn
+from deepul.hw3_helper import *
+import deepul.pytorch_util as ptu
+import warnings
+warnings.filterwarnings('ignore')
+device='cuda'
+
+visualize_q1_dataset()
+
+class Generator(nn.Module):
+    def __init__(self,input_dim:int,hidden_size:int):
+        super().__init__()
+        self.l1=torch.nn.Linear(input_dim, hidden_size)
+        self.l2=torch.nn.Linear(hidden_size, hidden_size)
+        self.l3=torch.nn.Linear(hidden_size,1)
+        self.acti=torch.nn.LeakyReLU(negative_slope=0.2)
+        
+    def forward(self,x:np.ndarray):
+        x=torch.Tensor(x).to(device)
+        x=self.l1(x)
+        x=self.acti(x)
+        x=self.l2(x)
+        x=self.acti(x)
+        x=self.l3(x)
+        return x
+class Discriminator(nn.Module):
+    def __init__(self,input_dim:int,hidden_size:int):
+        super().__init__()
+        self.l1=torch.nn.Linear(input_dim, hidden_size)
+        self.l2=torch.nn.Linear(hidden_size, hidden_size)
+        self.l3=torch.nn.Linear(hidden_size,1)
+        self.acti=torch.nn.LeakyReLU(negative_slope=0.2)
+        self.norm=torch.nn.Sigmoid()
+        
+    def forward(self,x:np.ndarray):
+        x=torch.Tensor(x).to(device)
+        x=self.l1(x)
+        x=self.acti(x)
+        x=self.l2(x)
+        x=self.acti(x)
+        x=self.l3(x)
+        x=self.norm(x)
+        return x
+    
+class GAN(nn.Module):
+    def __init__(self,input_dim:int,hidden_size:int):
+        super().__init__()
+        self.G=Generator(input_dim, hidden_size).to(device)
+        self.D=Discriminator(1, hidden_size).to(device)
+        
+        
+        
+def q1_a(train_data):
+    total=train_data.shape[0]
+    
+    pz=torch.distributions.Normal(loc=0, scale=1.0)
+    batch_size=500
+    n_batches=total//batch_size
+    
+    model=GAN(input_dim=1,hidden_size=128)
+    model.to(device)
+    
+    opt1=torch.optim.Adam(model.D.parameters(),lr=1e-3)
+    opt2=torch.optim.Adam(model.G.parameters(),lr=1e-3)
+    
+    epoch=30
+    sample_ep1=None
+    D_loss=[]
+    for i in range(0,epoch):
+        z=pz.sample((5000,1))
+        gz=model.G(z)
+        sample_ep1=gz.cpu().detach().numpy()
+        rand=np.random.randint(0,total,size=(batch_size*n_batches,))
+        grid1=np.linspace(-1, 1,num=1000).reshape((1000,1))
+        D_grid1=model.D(grid1).cpu().detach().numpy()
+        for j in range(0,n_batches):
+            for k in range(0, 5):
+                l=[]
+                indice=np.random.randint(0,batch_size*n_batches,size=(batch_size,))
+                rand1=rand[indice]
+                x=train_data[rand1]
+                x=x.reshape((batch_size,1))
+                z=pz.sample((batch_size,1))
+                gz=model.G(z).detach()
+                out=torch.log(model.D(x))+torch.log(1.0-model.D(gz))
+                loss=-out.mean()
+                opt1.zero_grad()
+                loss.backward()
+                opt1.step()
+                l.append(loss.item())
+            D_loss.append(sum(l)/len(l))
+            print(i,sum(l)/len(l))
+            z=pz.sample((batch_size,1))
+            gz=model.G(z)
+            out=torch.log(1.0-model.D(gz))
+            loss=out.mean()
+            opt2.zero_grad()
+            loss.backward()
+            opt2.step()
+    
+    z=pz.sample((5000,1))
+    gz=model.G(z).cpu().detach().numpy()
+    grid=np.linspace(-1, 1,num=1000).reshape((1000,1))
+    D_grid=model.D(grid).cpu().detach().numpy()
+    D_loss=np.array(D_loss)    
+    return D_loss,sample_ep1,grid,D_grid1,gz,grid,D_grid
+            
+            
+        
+
+def q1_b(train_data):
+    total=train_data.shape[0]
+    
+    pz=torch.distributions.Normal(loc=0, scale=1.0)
+    batch_size=500
+    n_batches=total//batch_size
+    
+    model=GAN(input_dim=1,hidden_size=128)
+    model.to(device)
+    
+    opt1=torch.optim.Adam(model.D.parameters(),lr=1e-3)
+    opt2=torch.optim.Adam(model.G.parameters(),lr=1e-3)
+    
+    epoch=20
+    sample_ep1=None
+    D_loss=[]
+    for i in range(0,epoch):
+        z=pz.sample((5000,1)).clip(-10,10)
+        gz=model.G(z)
+        sample_ep1=gz.cpu().detach().numpy()
+        rand=np.random.randint(0,total,size=(batch_size*n_batches,))
+        grid1=np.linspace(-1, 1,num=1000).reshape((1000,1))
+        D_grid1=model.D(grid1).cpu().detach().numpy()
+        for j in range(0,n_batches):
+            for k in range(0, 5):
+                l=[]
+                indice=np.random.randint(0,batch_size*n_batches,size=(batch_size,))
+                rand1=rand[indice]
+                x=train_data[rand1]
+                x=x.reshape((batch_size,1))
+                z=pz.sample((batch_size,1)).clip(-10,10)
+                gz=model.G(z).detach()
+                out=torch.log(model.D(x))+torch.log(1.0-model.D(gz))
+                loss=-out.mean()
+                opt1.zero_grad()
+                loss.backward()
+                opt1.step()
+                l.append(loss.item())
+            D_loss.append(sum(l)/len(l))
+            print(i,sum(l)/len(l))
+            z=pz.sample((batch_size,1)).clip(-10,10)
+            gz=model.G(z)
+            out=-torch.log(model.D(gz))
+            loss=out.mean()
+            opt2.zero_grad()
+            loss.backward()
+            opt2.step()
+    
+    z=pz.sample((5000,1)).clip(-10,10)
+    gz=model.G(z).cpu().detach().numpy()
+    grid=np.linspace(-1, 1,num=1000).reshape((1000,1))
+    D_grid=model.D(grid).cpu().detach().numpy()
+    D_loss=np.array(D_loss)    
+    return D_loss,sample_ep1,grid,D_grid1,gz,grid,D_grid
+
+
+q1_save_results('b', q1_b)
+        
