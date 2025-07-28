@@ -1,0 +1,155 @@
+from deepul.hw4_helper import *
+import warnings
+warnings.filterwarnings('ignore')
+
+from torch.optim.lr_scheduler import LRScheduler,LinearLR,CosineAnnealingLR,SequentialLR
+import numpy as np
+import torch
+import torch.nn as nn
+device='cuda'
+
+class f(nn.Module):
+    def __init__(self,hidden_size):
+        super().__init__()
+        self.L1=torch.nn.Linear(3, hidden_size)
+        self.L2=torch.nn.Linear(hidden_size, hidden_size)
+        self.L3=torch.nn.Linear(hidden_size, hidden_size)
+        self.L4=torch.nn.Linear(hidden_size, 2)
+        self.acti=torch.nn.ReLU()
+    
+    def forward(self,x:torch.Tensor):
+        x=self.L1(x)
+        x=self.acti(x)
+        x=self.L2(x)
+        x=self.acti(x)
+        x=self.L3(x)
+        x=self.acti(x)
+        x=self.L4(x)
+        return x
+
+class DDPM(nn.Module):
+    def __init__(self,):
+        super().__init__()
+        
+        self.f=f(hidden_size=64).to(device)
+        
+        
+    def compute_loss(self,eps,x_t,t):
+       eps=torch.Tensor(eps).to(device)
+       x_t=torch.Tensor(x_t).to(device)
+       t=torch.Tensor(t).to(device)
+       
+       feature=torch.concat([x_t,t],dim=-1)
+       eps_hat=self.f(feature)
+       L=((eps-eps_hat)**2).mean()
+       return L
+       
+    def sample(self,num_samples,num_steps):
+        ts=np.linspace(1-1e-4, 1e-4,num_steps+1)
+        normal=torch.distributions.MultivariateNormal(loc=torch.zeros(size=(2,),device=device),
+                                                      covariance_matrix=torch.eye(2,device=device))
+        x=normal.sample((num_samples,))
+        with torch.no_grad():
+            for i in range(0,num_steps):
+                t=ts[i]*np.ones((num_samples,1))
+                tm1=ts[i+1]*np.ones((num_samples,1))
+                t=torch.Tensor(t).to(device)
+                tm1=torch.Tensor(tm1).to(device)
+                feature=torch.concat([x,t],dim=-1)
+                eps_hat=self.f(feature)
+                x=self.update(x, eps_hat, t, tm1)
+        return x.cpu().detach().numpy()
+            
+        
+    
+    def update(self,x:torch.Tensor,eps_hat,t,tm1):
+        with torch.no_grad():
+            batch_size=x.shape[0]
+            alpha_t=torch.cos(np.pi/2.0*t)
+            sigma_t=torch.sin(np.pi/2.0*t)
+            
+            alpha_tm1=torch.cos(np.pi/2.0*tm1)
+            sigma_tm1=torch.sin(np.pi/2.0*tm1)
+            
+            eta=sigma_tm1/sigma_t*torch.sqrt(1.0-(alpha_t/alpha_tm1)**2)
+            
+            normal=torch.distributions.MultivariateNormal(loc=torch.zeros(size=(2,),device=device),
+                                                          covariance_matrix=torch.eye(2,device=device))
+            eps_t=normal.sample((batch_size,))
+            
+            x=alpha_tm1/alpha_t*(x-sigma_t*eps_hat)+torch.sqrt(torch.clamp(sigma_tm1**2-eta**2,min=0.0))*eps_hat+eta*eps_t
+        return x
+        
+def q1(train_data, test_data):
+    total=train_data.shape[0]
+    
+    batch_size=1024
+    n_batches=total//batch_size
+    
+    model=DDPM()
+    model.to(device)
+    
+    epoch=100
+    
+    opt=torch.optim.Adam(model.parameters(),lr=1e-3)
+    warm_up_sche=LinearLR(opt,start_factor=0.01,total_iters=100,last_epoch=-1)
+    cos_sche=CosineAnnealingLR(opt, T_max=800,eta_min=0.0)
+    
+    sche=SequentialLR(opt, schedulers=[warm_up_sche,cos_sche], milestones=[100])
+    
+    train_loss=[]
+    test_loss=[]
+    with torch.no_grad():
+        x=test_data
+        t=np.random.uniform(0,1,size=(x.shape[0],1))
+        alpha=np.cos(np.pi/2.0*t)
+        sigma=np.sin(np.pi/2.0*t)
+        eps=np.random.multivariate_normal(mean=np.zeros(2,), cov=np.eye(2),size=(x.shape[0],))
+        
+        x_t=alpha*x+sigma*eps
+        
+        L=model.compute_loss(eps, x_t, t)
+        test_loss.append(L.item())
+    for i in range(0,epoch):
+        rand=np.random.randint(0,total,(batch_size*n_batches,))
+        for j in range(0,n_batches):
+            rand1=rand[j*batch_size:(j+1)*batch_size]
+            x=train_data[rand1]
+            t=np.random.uniform(0,1,size=(batch_size,1))
+            alpha=np.cos(np.pi/2.0*t)
+            sigma=np.sin(np.pi/2.0*t)
+            eps=np.random.multivariate_normal(mean=np.zeros(2,), cov=np.eye(2),size=(batch_size,))
+            x_t=alpha*x+sigma*eps
+            
+            L=model.compute_loss(eps, x_t, t)
+            print(i,L.item())
+            train_loss.append(L.item())
+            opt.zero_grad()
+            L.backward()
+            opt.step()
+            sche.step()
+        
+        with torch.no_grad():
+            x=test_data
+            t=np.random.uniform(0,1,size=(x.shape[0],1))
+            alpha=np.cos(np.pi/2.0*t)
+            sigma=np.sin(np.pi/2.0*t)
+            eps=np.random.multivariate_normal(mean=np.zeros(2,), cov=np.eye(2),size=(x.shape[0],))
+            x_t=alpha*x+sigma*eps
+            
+            L=model.compute_loss(eps, x_t, t)
+            test_loss.append(L.item())
+        torch.save(model.state_dict(),'q1.pth')
+    
+    time_step=np.power(2,np.linspace(0, 9,9)).astype(int)
+    e=[]
+    for i in range(0,time_step.shape[0]):
+        e.append(model.sample(2000, num_steps=time_step[i]))
+    samples=np.stack(e,axis=0)
+    train_loss=np.array(train_loss)
+    test_loss=np.array(test_loss)
+            
+            
+    return train_loss,test_loss,samples
+
+q1_save_results(q1)
