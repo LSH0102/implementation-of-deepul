@@ -1,0 +1,205 @@
+from deepul.hw2_helper import *
+import numpy as np
+import os
+import torch
+import torch.nn as nn
+device='cuda'
+
+ 
+class Encoder(nn.Module):
+    def __init__(self,latent_dim,in_channel):
+        super().__init__()
+        self.latent_dim=latent_dim
+        
+        self.conv1=nn.Conv2d(in_channels=in_channel, out_channels=32, kernel_size=3,stride=1,padding=1)
+        self.acti=nn.ReLU()
+        self.conv2=nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3,stride=2,padding=1)
+        self.conv3=nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3,stride=2,padding=1)
+        
+        self.conv4=nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3,stride=2,padding=1)
+        
+        self.linear=torch.nn.Linear(4*4*256, 2*self.latent_dim)
+        
+    def forward(self,x:torch.Tensor):
+        x=self.conv1(x)
+        x=self.acti(x)
+        x=self.conv2(x)
+        x=self.acti(x)
+        x=self.conv3(x)
+        x=self.acti(x)
+        x=self.conv4(x)
+        x=self.acti(x)
+        x=torch.flatten(x,start_dim=1)
+        x=self.linear(x)
+        return x
+    
+class Decoder(nn.Module):
+    def __init__(self,latent_dim):
+        super().__init__()
+        self.latent_dim=latent_dim
+        self.linear=torch.nn.Linear(self.latent_dim, 4*4*128)
+        self.acti=nn.ReLU()
+        
+        self.conv1=nn.ConvTranspose2d(128, out_channels=128, kernel_size=4,stride=2,padding=1)
+        
+        self.conv2=nn.ConvTranspose2d(128, out_channels=64, kernel_size=4,stride=2,padding=1)
+        self.conv3=nn.ConvTranspose2d(64,  out_channels=32, kernel_size=4,stride=2,padding=1)
+        self.conv4=nn.Conv2d(in_channels=32, out_channels=3, kernel_size=3,stride=1,padding=1)
+        
+    def forward(self,x:torch.Tensor):
+        x=self.linear(x)
+        x=self.acti(x)
+        batch_size=x.shape[0]
+        x=x.reshape((batch_size,4,4,128))
+        x=x.permute((0,3,1,2))
+        x=self.conv1(x)
+        x=self.acti(x)
+        x=self.conv2(x)
+        x=self.acti(x)
+        x=self.conv3(x)
+        x=self.acti(x)
+        x=self.conv4(x) 
+        
+        return x
+        
+        
+        
+        
+
+class VAE(nn.Module):
+    def __init__(self,latent_dim,H,W,in_channel):
+        super().__init__()
+        self.latent_dim=latent_dim
+        
+        self.z=torch.distributions.MultivariateNormal(loc=torch.zeros((self.latent_dim,),device=device),
+                                                      covariance_matrix=torch.diag_embed(torch.ones((self.latent_dim,),device=device)))
+        self.encoder=Encoder(latent_dim, in_channel).to(device)
+        self.decoder=Decoder(latent_dim).to(device)
+        
+        self.recon_fn=torch.nn.MSELoss()
+        
+    def KL(self,x:np.ndarray):
+        x=torch.Tensor(x).to(device)
+        mean,cov_diag=self.encoder(x).split(self.latent_dim,dim=-1)
+        q=torch.distributions.MultivariateNormal(loc=mean,covariance_matrix=torch.diag_embed(torch.exp(2.0*cov_diag)))
+        zs=q.rsample()
+        out=q.log_prob(zs)-self.z.log_prob(zs)
+        
+        cov_diag=torch.exp(2.0*cov_diag)
+        out=0.5*(cov_diag-torch.log(cov_diag)+mean**2-1).sum(-1)
+        return out.mean()
+    
+    def Recon_loss(self,x:np.ndarray):
+        x=torch.Tensor(x).to(device)
+        mean,cov_diag=self.encoder(x).split(self.latent_dim,dim=-1)
+        q=torch.distributions.MultivariateNormal(loc=mean,covariance_matrix=torch.diag_embed(torch.exp(2.0*cov_diag)))
+        zs=q.rsample()
+        y=self.decoder(zs)
+        
+        
+        
+        return 0.5*self.recon_fn(y,x)
+    
+    def compute_ELBO(self,x:np.ndarray):
+        rec=self.Recon_loss(x)
+        kl=self.KL(x)
+        return rec+kl,rec,kl
+    
+    def sample(self,num_samples):
+        with torch.no_grad():
+            z=self.z.sample((num_samples,))
+            p=self.decoder(z)
+            p=torch.distributions.Normal(loc=p, scale=1)
+            x=p.rsample()
+        return x.cpu().detach().numpy()
+    
+    def reconstruction(self,x:np.ndarray):
+        with torch.no_grad():
+            x=torch.Tensor(x).to(device)
+            mean,cov_diag=self.encoder(x).split(self.latent_dim,dim=-1)
+            q=torch.distributions.MultivariateNormal(loc=mean,covariance_matrix=torch.diag_embed(torch.exp(cov_diag)))
+            zs=q.rsample()
+            p=self.decoder(zs)
+            p=torch.distributions.Normal(loc=p, scale=1)
+            x=p.rsample()
+        return x.cpu().detach().numpy()
+    
+    def interpolation(self,start:np.ndarray,end:np.ndarray):
+        with torch.no_grad():
+            start=torch.Tensor(start).to(device)
+            end=torch.Tensor(end).to(device)
+            z_start=self.encoder(start)[:,:self.latent_dim]
+            z_end=self.encoder(end)[:,:self.latent_dim]
+            x=[start]
+            for i in range(1,9):
+                zs=i/10.0*z_end+(10.0-i)/10.0*z_start
+                
+                v=self.decoder(zs)
+                p=torch.distributions.Normal(loc=v, scale=1)
+                z_int=p.rsample()
+                x.append(z_int)
+            x.append(end)
+        x=torch.stack(x,dim=1).reshape((-1,3,32,32))
+        return x.cpu().detach().numpy()
+        
+def q2_a(train_data,test_data,dset_id):
+    test_data=test_data[:200].transpose((0,3,1,2))
+    channel=train_data.shape[3]
+    H=train_data.shape[1]
+    W=train_data.shape[2]
+    total=train_data.shape[0]
+    batch_size=128
+    n_batches=total//batch_size
+    
+    model=VAE(latent_dim=16,H=H,W=W,in_channel=channel)
+    model.to(device)
+    
+    model.load_state_dict(torch.load('q2_svhn.pth'))
+    
+    epoch=1
+    opt=torch.optim.Adam(model.parameters(),lr=1e-3)
+    
+    train_loss=[[1,1,1]]
+    test_loss=[[1,1,1]]
+    for i in range(0,epoch):
+        rand_indices = np.random.randint(0,total, size=(batch_size*n_batches,))
+        for j in range(0,n_batches):
+            data=train_data[rand_indices[j*batch_size:(j+1)*batch_size]]
+            data=data.transpose((0,3,1,2))   #卷积的输入要求(batch_size, channel, H,W)
+            
+            ELBO,rec,KL=model.compute_ELBO(data)
+            
+            print(i,ELBO.item())
+            opt.zero_grad()
+            ELBO.backward()
+            opt.step()
+            
+            train_loss.append([ELBO.item(),rec.item(),KL.item()])
+        with torch.no_grad():
+            ELBO,rec,KL=model.compute_ELBO(test_data)
+            test_loss.append([ELBO.item(),rec.item(),KL.item()])
+    torch.save(model.state_dict(),'q2_svhn.pth')
+    
+    sample=model.sample(100).transpose(0,2,3,1)
+    
+    tar=train_data[:50].transpose(0,3,1,2)
+    reconstruction=model.reconstruction(tar).transpose(0,2,3,1)
+    tar=tar.transpose(0,2,3,1)
+    reconstruction=reconstruction[:,np.newaxis,:,:,:]
+    tar=tar[:,np.newaxis,:,:,:]
+    rec=np.concatenate( (tar, reconstruction),axis=1)
+    sample2=rec.reshape((-1,32,32,3))
+    
+    
+    rand1=np.random.randint(0,200,size=(10,))
+    rand2=np.random.randint(0,200,size=(10,))
+    start=test_data[rand1]
+    end=test_data[rand2]
+    
+    interpolation=model.interpolation(start, end).transpose(0,2,3,1)
+    
+    train_loss=np.array(train_loss)
+    test_loss=np.array(test_loss)
+    return train_loss,test_loss,sample,sample2,interpolation
+
+q2_save_results('a', 1, q2_a)
