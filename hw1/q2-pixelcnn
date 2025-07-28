@@ -1,0 +1,338 @@
+import numpy as np
+import torch 
+from torch import nn
+from deepul.hw1_helper import (
+    # Q1
+    visualize_q1_data,
+    q1_sample_data_1,
+    q1_sample_data_2,
+    q1_save_results,
+    # Q2
+    q2a_save_results,
+    q2b_save_results,
+    visualize_q2a_data,
+    visualize_q2b_data,
+    # Q3
+    q3ab_save_results,
+    q3c_save_results,
+    # Q4
+    q4a_save_results,
+    q4b_save_results,
+    # Q5
+    visualize_q5_data,
+    q5a_save_results,
+    # Q6
+    visualize_q6_data,
+    q6a_save_results,
+)
+
+device='cuda'
+
+class PixelCNN(nn.Module):
+    def __init__(self,in_channel:int, out_logits:int,height:int,width:int,filter_num:int,ker_size:int):
+        super().__init__()
+        self.conv1=torch.nn.Conv2d(in_channel, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.H=height
+        self.W=width
+        with torch.no_grad():
+            maskA=torch.ones((ker_size,ker_size))
+            maskA[ker_size//2:,ker_size//2:]=0
+            maskA[ker_size//2+1:,:]=0
+            
+            maskB=torch.ones((ker_size,ker_size))
+            maskB[ker_size//2:,ker_size//2+1:]=0
+            maskB[ker_size//2+1:,:]=0
+    
+        self.maskA=maskA.to(device)
+        self.maskB=maskB.to(device)
+        self.conv2=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.conv3=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.conv4=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.conv5=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.conv6=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        
+        self.conv7=torch.nn.Conv2d(filter_num, filter_num,kernel_size=1,padding=0 )
+        self.conv8=torch.nn.Conv2d(filter_num, out_logits,kernel_size=1,padding=0 )
+        
+        self.acti=torch.nn.ReLU()
+        self.softmax=torch.nn.Softmax(dim=1)
+    def forward(self, x:np.ndarray):
+        x=x.transpose(0,3,1,2)
+        
+        x=2*(x-x.min())/(x.max()-x.min())-1
+        
+        x=torch.Tensor(x).to(device)
+        with torch.no_grad():
+            self.conv1.weight.data=self.conv1.weight.data*self.maskA
+            
+            self.conv2.weight.data=self.conv2.weight.data*self.maskB
+            self.conv3.weight.data=self.conv3.weight.data*self.maskB
+            self.conv4.weight.data=self.conv4.weight.data*self.maskB
+            self.conv5.weight.data=self.conv5.weight.data*self.maskB
+            self.conv6.weight.data=self.conv6.weight.data*self.maskB
+        
+        x=self.conv1(x)
+        
+        x=self.conv2(x)
+        x=self.acti(x)
+        x=self.conv3(x)
+        
+        x=self.acti(x)
+        x=self.conv4(x)
+        
+        x=self.conv5(x)
+        x=self.acti(x)
+        x=self.conv6(x)
+        
+        x=self.conv7(x)
+        x=self.acti(x)
+        x=self.conv8(x)
+        
+        prob=self.softmax(x)
+        
+        return prob
+        
+    def compute_maxlikelihood(self,x:np.ndarray):
+        y=x.transpose(0,3,1,2)
+        y=torch.LongTensor(y).to(device)
+        logits=self.forward(x)
+        
+        probs=torch.gather(logits, dim=1, index=y)
+        
+        L=torch.log(probs)
+        
+        
+        
+        return L.mean()
+    
+    def sample(self, num_sample:int):
+        y=np.random.randint(0,2,size=(num_sample,self.H,self.W,1))
+        with torch.no_grad():
+            for i in range(0,self.H):
+                for j in range(0,self.W):
+                    if i==0 and j==0:
+                        continue
+                    x=self.forward(y)
+                    x=x.cpu().detach().numpy()
+                    x=x.transpose(0,2,3,1)[...,1]
+                    samples=np.random.binomial(n=1, p=x,size=x.shape)
+                    samples=np.expand_dims(samples,axis=-1)
+                    y[:,i,j,:]=samples[:,i,j,:]
+              
+        return y
+        
+        
+        
+def q2_a(train_data, test_data, image_shape, dset_id):
+    
+    seed=40
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)  
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    
+    H=image_shape[0]
+    W=image_shape[1]
+    model=PixelCNN(train_data.shape[3], 2, H, W, filter_num=64, ker_size=7)
+    opt=torch.optim.Adam(model.parameters(),lr=1e-3)
+    
+    model.cuda()
+
+    epochs=500
+    mini_batch_size=128
+    batch_size=train_data.shape[0]
+    
+    train_losses=[]
+    test_losses=[]
+    test_losses.append(-model.compute_maxlikelihood(test_data).cpu().detach().numpy())
+    
+    for i in range(0,epochs):
+        rand_indices = np.random.randint(0,batch_size , size=(mini_batch_size,))
+        data=train_data[rand_indices]
+        
+        L=-model.compute_maxlikelihood(data)
+        
+        opt.zero_grad()
+        L.backward()
+        
+        opt.step()
+        
+        
+       
+        
+        train_losses.append(L.cpu().detach().numpy())
+        test_losses.append(L.cpu().detach().numpy())
+    train_losses=np.array(train_losses)
+    test_losses=np.array(test_losses)
+    sample=model.sample(100)
+    return train_losses,test_losses,sample
+
+
+class PixelCNN_colored(nn.Module):
+    def __init__(self,in_channel:int, out_logits:int,height:int,width:int,filter_num:int,ker_size:int):
+        super().__init__()
+        self.conv1=torch.nn.Conv2d(in_channel, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.H=height
+        self.W=width
+        with torch.no_grad():
+            maskA=torch.ones((ker_size,ker_size))
+            maskA[ker_size//2:,ker_size//2:]=0
+            maskA[ker_size//2+1:,:]=0
+            
+            maskB=torch.ones((ker_size,ker_size))
+            maskB[ker_size//2:,ker_size//2+1:]=0
+            maskB[ker_size//2+1:,:]=0
+    
+        self.maskA=maskA.to(device)
+        self.maskB=maskB.to(device)
+        self.conv2=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.conv3=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.conv4=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.conv5=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        self.conv6=torch.nn.Conv2d(filter_num, filter_num,kernel_size=ker_size,padding=(ker_size-1)//2 )
+        
+        self.conv7=torch.nn.Conv2d(filter_num, filter_num,kernel_size=1,padding=0 )
+        self.conv8=torch.nn.Conv2d(filter_num, in_channel*out_logits,kernel_size=1,padding=0 )
+        
+        self.ln1=torch.nn.LayerNorm(normalized_shape=(height,width))
+        
+        
+        self.acti=torch.nn.ReLU()
+        self.softmax=torch.nn.Softmax(dim=1)
+        self.out_logits=out_logits
+        self.in_channel=in_channel
+    def forward(self, x:np.ndarray):
+        x=x.transpose(0,3,1,2)
+        
+        x=2*(x-x.min())/(x.max()-x.min())-1
+        
+        x=torch.Tensor(x).to(device)
+        with torch.no_grad():
+            self.conv1.weight.data=self.conv1.weight.data*self.maskA
+            
+            self.conv2.weight.data=self.conv2.weight.data*self.maskB
+            self.conv3.weight.data=self.conv3.weight.data*self.maskB
+            self.conv4.weight.data=self.conv4.weight.data*self.maskB
+            self.conv5.weight.data=self.conv5.weight.data*self.maskB
+            self.conv6.weight.data=self.conv6.weight.data*self.maskB
+        
+        
+        x=self.conv1(x)
+        y=x
+        x=self.conv2(x)
+        x=self.ln1(x+y)
+        x=self.acti(x)
+        x=x+self.conv3(x)
+        
+        x=self.acti(x)
+        y=x
+        x=self.conv4(x)
+        
+        x=self.conv5(x)
+        x=x+y
+        x=self.acti(x)
+        y=x
+        x=self.conv6(x)
+        
+        x=self.conv7(x)
+        x=x+y
+        x=self.acti(x)
+        x=self.conv8(x)
+        
+        xr,xg,xb=torch.split(x,split_size_or_sections=self.out_logits,dim=1)
+        probr=self.softmax(xr)
+        probg=self.softmax(xg)
+        probb=self.softmax(xb)
+        
+        return probr,probg,probb
+        
+    def compute_maxlikelihood(self,x:np.ndarray):
+        y=x.transpose(0,3,1,2)
+        y=torch.LongTensor(y).to(device)
+        yr,yg,yb=torch.split(y, split_size_or_sections=1,dim=1)
+        probr,probg,probb=self.forward(x)
+        
+        probr=torch.gather(probr, dim=1, index=yr)
+        probg=torch.gather(probg, dim=1, index=yg)
+        probb=torch.gather(probb, dim=1, index=yb)
+        L=torch.log(probr*probg*probb)
+        
+        
+        
+        return L.mean()
+    
+    def sample(self, num_sample:int):
+        y=np.random.randint(0,self.out_logits,size=(num_sample,self.H,self.W,self.in_channel))
+        
+        
+        with torch.no_grad():
+            for i in range(0,self.H):
+                for j in range(0,self.W):
+                    if i==0 and j==0:
+                        continue
+                    probr,probg,probb=self.forward(y)
+                    
+                    probr=probr.permute(0,2,3,1)
+                    probg=probg.permute(0,2,3,1)
+                    probb=probb.permute(0,2,3,1)
+                    
+                    dist_r=torch.distributions.Categorical(probs=probr)
+                    dist_g=torch.distributions.Categorical(probs=probg)
+                    dist_b=torch.distributions.Categorical(probs=probb)
+                    
+                    samples_r=dist_r.sample().unsqueeze(-1).cpu().detach().numpy()
+                    samples_g=dist_g.sample().unsqueeze(-1).cpu().detach().numpy()
+                    samples_b=dist_b.sample().unsqueeze(-1).cpu().detach().numpy()
+                    
+                    
+                    y[:,i,j,0]=samples_r[:,i,j,0]
+                    y[:,i,j,1]=samples_g[:,i,j,0]
+                    y[:,i,j,2]=samples_b[:,i,j,0]
+              
+        return y
+
+
+
+
+
+
+
+
+
+def q2_b(train_data, test_data, image_shape, dset_id):
+    
+    total,H,W,channels=train_data.shape
+    batch_size=100
+    
+    n_batches=total//(5*batch_size)
+    
+    epoch=5
+    train_losses=[]
+    test_losses=[]
+    model=PixelCNN_colored(in_channel=3, out_logits=4, height=H,width= W, filter_num=120, ker_size=7)
+    model.cuda()
+    opt=torch.optim.Adam(model.parameters(),lr=1e-3)
+    with torch.no_grad():
+        test_losses.append(-model.compute_maxlikelihood(test_data).cpu().detach().numpy())
+    for i in range(0,epoch):
+        rand_indices = np.random.randint(0,total, size=(batch_size*n_batches,))
+        for j in range(0,n_batches):
+            data=train_data[rand_indices[j*batch_size:(j+1)*batch_size]]
+            L=-model.compute_maxlikelihood(data)
+            print(L)
+            opt.zero_grad()
+            L.backward()
+            opt.step()
+            
+            train_losses.append(L.cpu().detach().numpy())
+        print('eval test loss',i)
+        with torch.no_grad():
+            test_losses.append(-model.compute_maxlikelihood(test_data).cpu().detach().numpy())
+    train_losses=np.array(train_losses)
+    test_losses=np.array(test_losses)
+    sample=model.sample(100)
+    return train_losses,test_losses,sample
+            
+    
+q2b_save_results(2, 'b', q2_b)  
+    
