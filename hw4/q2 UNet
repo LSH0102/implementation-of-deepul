@@ -1,0 +1,270 @@
+from deepul.hw4_helper import *
+import warnings
+warnings.filterwarnings('ignore')
+
+from torch.nn.functional import interpolate
+from torch.optim.lr_scheduler import LRScheduler,LinearLR,CosineAnnealingLR,SequentialLR
+import numpy as np
+import torch
+import torch.nn as nn
+device='cuda'
+
+class ResidualBlock(nn.Module):
+    def __init__(self,in_channels,out_channels,temb_channels):
+        super().__init__()
+        self.conv1=nn.Conv2d(in_channels, out_channels, kernel_size=3,padding=1)
+        self.gn1=nn.GroupNorm(num_groups=8, num_channels=out_channels)
+        self.acti=nn.SiLU()
+        
+        self.linear=nn.Linear(temb_channels, out_channels)
+        
+        self.conv2=nn.Conv2d(out_channels, out_channels, kernel_size=3,padding=1)
+        self.gn2=nn.GroupNorm(num_groups=8, num_channels=out_channels)
+        self.in_channels=in_channels
+        self.out_channels=out_channels
+        
+        self.conv3=nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        
+    def forward(self,x:torch.Tensor, temb=torch.Tensor):
+        h=self.conv1(x)
+        h=self.gn1(h)
+        h=self.acti(h)
+        
+        temb=self.linear(temb)
+        h+=temb[:,:,None,None]
+        
+        h=self.conv2(h)
+        h=self.gn2(h)
+        h=self.acti(h)
+        if self.in_channels!=self.out_channels:
+            h=self.conv3(h)
+        return x+h
+
+class DownSample(nn.Module):
+    def __init__(self,in_channels):
+        super().__init__()
+        self.conv=nn.Conv2d(in_channels, in_channels, kernel_size=3,stride=2,padding=1)
+    def forward(self,x:torch.Tensor):
+        return self.conv(x)
+class UpSample(nn.Module):
+    def __init__(self,in_channels):
+        super().__init__()
+        self.conv=nn.Conv2d(in_channels, in_channels, kernel_size=3,padding=1)
+    def forward(self,x:torch.Tensor):
+        x=interpolate(x,scale_factor=2)
+        x=self.conv(x)
+        return x
+def timestep_embedding(timesteps,dim,max_period=10000):
+    half=dim//2
+    freqs=np.exp(-np.log(max_period)*np.arange(0,half,dtype=np.float32 )/half)
+    args=timesteps[:,None].astype(np.float32)*freqs[None]
+    embedding=np.concatenate( (np.cos(args), np.sin(args)),axis=-1)
+    if dim%2==1:
+        embedding=np.concatenate((embedding, np.zeros_like(embedding[:,:1])),axis=-1)
+    return embedding
+
+class UNet(nn.Module):
+    def __init__(self,in_channels,hidden_dims,blocks_per_dim):
+        super().__init__()
+        
+        self.temb_channels=hidden_dims[0]*4
+        self.emb=nn.Sequential(nn.Linear(hidden_dims[0],self.temb_channels),
+                               nn.SiLU(),nn.Linear(self.temb_channels, self.temb_channels))
+        
+        self.conv1=nn.Conv2d(in_channels, hidden_dims[0], kernel_size=3,padding=1)
+        
+        self.hidden_dims=hidden_dims
+        prev_ch=hidden_dims[0]
+        self.blocks_per_dim=blocks_per_dim
+        self.Res=[]
+        self.Down=[]
+        self.down_block_chans=[prev_ch]
+        for i,hidden_dim in enumerate(hidden_dims):
+            for _ in range(self.blocks_per_dim):
+                self.Res.append(ResidualBlock(prev_ch, hidden_dim, self.temb_channels))
+                prev_ch=hidden_dim
+                self.down_block_chans.append(prev_ch)
+                
+            if i!=len(hidden_dims)-1:
+                self.Down.append(DownSample(prev_ch))
+                self.down_block_chans.append(prev_ch)
+                
+        self.res1=ResidualBlock(prev_ch, prev_ch, self.temb_channels)
+        self.res2=ResidualBlock(prev_ch, prev_ch, self.temb_channels)
+        
+        self.down_res=[]
+        self.up=[]
+        for i,hidden_dim in list(enumerate(hidden_dims))[:,:-1]:
+            for j in range(0,self.blocks_per_dim+1):
+                dch=self.down_block_chans.pop()
+                self.down_res.append(ResidualBlock(prev_ch+dch, hidden_dim, temb_channels))
+                prev_ch=hidden_dim
+                if i==self.blocks_per_dim and j==self.blocks_per_dim:
+                    self.up.append(UpSample(prev_ch))
+        self.gn=nn.GroupNorm(num_groups=8, num_channels=prev_ch)
+        self.acti=nn.SiLU()
+        self.conv2=nn.Conv2d(prev_ch, in_channels, kernel_size=3,padding=1)
+        
+    def forward(self,x:np.ndarray,t:np.ndarray):
+        emb=timestep_embedding(t, self.hidden_dims[0])
+        emb=torch.Tensor(emb).to(device)
+        emb=self.emb(emb)
+        
+        x=torch.Tensor(x).to(device)
+        h=self.conv1(x)
+        hs=[h]
+        
+        prev_ch=self.hidden_dims[0]
+        down_block_chans=[prev_ch]
+        t=0
+        d=0
+        for i, hidden_dim in enumerate(self.hidden_dims):
+            for _ in range(self.blocks_per_dim):
+                h=self.Res[t](h,emb)
+                t=t+1
+                hs.append(h)
+                prev_ch=hidden_dim
+                down_block_chans.append(prev_ch)
+            if i!=len(self.hidden_dims)-1:
+                h=self.Down[d](h)
+                hs.append(h)
+                down_block_chans.append(prev_ch)
+                d=d+1
+        h=self.res1(h,emb)
+        h=self.res2(h.emb)
+        
+        u=0
+        v=0
+        for i,hidden_dim in list(enumerate(self.idden_dims))[:,:-1]:
+            for j in range(0,self.blocks_per_dim+1):
+                dch=down_block_chans.pop()
+                h=self.down_res[u](torch.concat([h,hs.pop()],dim=-1),emb)
+                u=u+1
+                prev_ch=hidden_dim
+                if i==self.blocks_per_dim and j==self.blocks_per_dim:
+                    h=self.up[v](h)
+                    v=v+1
+        h=self.gn(h)
+        h=self.acti(h)
+        out=self.conv2(h)
+        return out
+    
+class DDPM(nn.Module):
+    def __init__(self,in_channels,hidden_dims,blocks_per_dim,T):
+        self.f=UNet(in_channels, hidden_dims, blocks_per_dim).to(device)
+        self.T=T
+        self.betas=torch.Tensor(np.linspace(1e-4, 0.02,self.T+1)).to(device)
+        self.alpha=1-self.betas
+        self.alpha_bar=torch.concat([torch.Tensor([1.0],device=device),torch.cumprod(self.alpha[1:], dim=0)])
+        self.alpha_bar=self.alpha_bar.unsqueeze(1)
+        self.alpha=self.alpha.unsqueeze(1)
+    
+    def compute_loss(self,x0,t):
+        batch_size,channels,H,W=x0.shape
+        p=torch.distributions.MultivariateNormal(loc=torch.zeros((channels*H*W,),device=device),
+                                                 covariance_matrix=torch.eye(channels*H*W,device=device))
+        
+        eps=p.sample((batch_size,))
+        eps=eps.reshape((batch_size,channels,H,W))
+        a_bar=torch.gather(self.alpha_bar, dim=0, index=torch.LongTensor(t).to(device))
+        
+        x0=torch.Tensor(x0).to(device)
+        tilde_x=torch.sqrt(a_bar)*x0+torch.sqrt(1-a_bar)*eps
+        
+        eps_hat=self.f(tilde_x,t)
+        L=((eps-eps_hat)**2).mean()
+        return L
+    
+    def sample(self,num_samples,num_steps):
+        ts=np.linspace(self.T, 0,num_steps+1).astype(int)
+        
+        normal=torch.distributions.MultivariateNormal(loc=torch.zeros(size=(3072,),device=device),
+                                                      covariance_matrix=torch.eye(3072,device=device))
+        x=normal.sample((num_samples,))
+        x=x.reshape((num_samples,3,32,32))
+        with torch.no_grad():
+            for i in range(0,num_steps):
+                if ts[i]>1:
+                    p=torch.distributions.MultivariateNormal(loc=torch.zeros(size=(3072,),device=device),
+                                                                  covariance_matrix=torch.eye(3072,device=device))
+                    z=p.sample((num_samples,))
+                    z=z.reshape((num_samples,3,32,32))
+                else:
+                    z=torch.zeros((num_samples,3,32,32),device=device)
+                    
+                t=ts[i]*np.ones((num_samples,1))
+                t=torch.LongTensor(t).to(device)
+    
+                alpha=torch.gather(self.alpha, dim=0, index=t)
+                alpha_bar=torch.gather(self.alpha_bar, dim=0, index=t)
+                eps=self.f(x,t)
+                x=1/torch.sqrt(alpha)*(x-(1.0-alpha)/torch.sqrt(1-alpha_bar)*eps)+torch.sqrt(1-alpha)*z
+        return x.cpu().detach().numpy()
+                        
+
+
+def q2(train_data,test_data):
+    test_data=test_data[:10]
+    total=train_data.shape[0]
+    
+    batch_size=256
+    n_batches=total//batch_size
+    
+    T=1000
+    model=DDPM(in_channels=3, hidden_dims=[64,128,256,512], blocks_per_dim=2, T=T)
+    model.to(device)
+    
+    epoch=60
+    
+    opt=torch.optim.Adam(model.parameters(),lr=1e-3)
+    warm_up_sche=LinearLR(opt,start_factor=0.01,total_iters=100,last_epoch=-1)
+    cos_sche=CosineAnnealingLR(opt, T_max=800,eta_min=0.0)
+    
+    sche=SequentialLR(opt, schedulers=[warm_up_sche,cos_sche], milestones=[100])
+    
+    train_loss=[]
+    test_loss=[]
+    with torch.no_grad():
+        x=test_data
+        t=np.random.randint(low=1,high=T+1,size=(x.shape[0],))
+        L=model.compute_loss(x, t)
+        test_loss.append(L.item())
+        
+    for i in range(0,epoch):
+        rand=np.random.randint(0,total,(batch_size*n_batches,))
+        for j in range(0,n_batches):
+            rand1=rand[j*batch_size:(j+1)*batch_size]
+            x=train_data[rand1]
+            t=np.random.randint(1,T+1,size=(batch_size,1))
+            alpha=np.cos(np.pi/2.0*t)
+            sigma=np.sin(np.pi/2.0*t)
+            eps=np.random.multivariate_normal(mean=np.zeros(2,), cov=np.eye(2),size=(batch_size,))
+            x_t=alpha*x+sigma*eps
+            
+            L=model.compute_loss(eps, x_t, t)
+            print(i,L.item())
+            train_loss.append(L.item())
+            opt.zero_grad()
+            L.backward()
+            opt.step()
+            sche.step()
+        
+        with torch.no_grad():
+            x=test_data
+            t=np.random.randint(low=1,high=T+1,size=(x.shape[0],))
+            L=model.compute_loss(x, t)
+            test_loss.append(L.item())
+        torch.save(model.state_dict(),'q2.pth')
+    
+    time_step=np.power(2,np.linspace(0, 9,9)).astype(int)
+    e=[]
+    for i in range(0,time_step.shape[0]):
+        e.append(model.sample(2000, num_steps=time_step[i]))
+    samples=np.stack(e,axis=0)
+    train_loss=np.array(train_loss)
+    test_loss=np.array(test_loss)
+            
+            
+    return train_loss,test_loss,samples
+
+q2_save_results(q2)
